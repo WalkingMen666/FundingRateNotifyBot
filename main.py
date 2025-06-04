@@ -1,11 +1,12 @@
 import os
 import json
-import asyncio
 import requests
+import asyncio
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
 from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
 load_dotenv()
@@ -22,9 +23,12 @@ MEXC_FUNDING_RATE_URL = "https://contract.mexc.com/api/v1/contract/funding_rate"
 # 创建Flask应用
 app = Flask(__name__)
 
-# 创建Bot和Application
+# 創建Bot和Application - 確保正確初始化
 bot = Bot(token=bot_token)
 application = Application.builder().token(bot_token).build()
+
+# 初始化狀態追蹤
+initialized = False
 
 # 獲取前3高資金費率的函數
 def get_top3_funding_rates():
@@ -109,23 +113,28 @@ async def button_callback(update, context):
                 text="查詢失敗，請稍後重試", reply_markup=reply_markup
             )
 
-# 註冊處理器
-application.add_handler(CommandHandler("start", start_command))
-application.add_handler(CommandHandler("funding", funding_command))
-application.add_handler(CallbackQueryHandler(button_callback))
+# 初始化函數
+async def initialize_bot():
+    global initialized
+    if not initialized:
+        try:
+            # 初始化 Bot 和 Application
+            await bot.initialize()
+            await application.initialize()
+            
+            # 註冊處理器
+            application.add_handler(CommandHandler("start", start_command))
+            application.add_handler(CommandHandler("funding", funding_command))
+            application.add_handler(CallbackQueryHandler(button_callback))
+            
+            initialized = True
+            print("Bot and Application initialized successfully!")
+            
+        except Exception as e:
+            print(f"Error during initialization: {e}")
+            raise
 
-# 全域變數來追蹤初始化狀態
-app_initialized = False
-
-# 初始化 Application 的函數
-async def initialize_application():
-    global app_initialized
-    if not app_initialized:
-        await application.initialize()
-        app_initialized = True
-        print("Application initialized successfully!")
-
-# Webhook路由 - 修復版本
+# Webhook路由
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -133,13 +142,20 @@ def webhook():
         json_str = request.get_data().decode('UTF-8')
         update = Update.de_json(json.loads(json_str), bot)
         
-        # 確保 application 已初始化後再處理更新
-        async def process_update_wrapper():
-            await initialize_application()
-            await application.process_update(update)
+        # 在新的事件循環中處理更新
+        def run_async():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(initialize_bot())
+                loop.run_until_complete(application.process_update(update))
+            finally:
+                loop.close()
         
-        # 使用asyncio運行異步處理
-        asyncio.run(process_update_wrapper())
+        # 在新線程中運行異步代碼
+        thread = threading.Thread(target=run_async)
+        thread.start()
+        thread.join()
         
         return 'OK'
     except Exception as e:
@@ -161,8 +177,7 @@ def home():
 # 設置webhook
 async def set_webhook():
     try:
-        # 初始化 Application
-        await initialize_application()
+        await initialize_bot()
         
         if not webhook_url:
             print("Warning: WEBHOOK_URL not set, skipping webhook setup")
@@ -173,7 +188,6 @@ async def set_webhook():
         print(f"Webhook set to: {webhook_endpoint}")
         
         # 設置命令菜單
-        from telegram import BotCommand
         await bot.set_my_commands([
             BotCommand("start", "開始使用機器人"),
             BotCommand("funding", "查詢前3高資金費率")
@@ -184,14 +198,6 @@ async def set_webhook():
         print(f"Error setting webhook: {e}")
         import traceback
         traceback.print_exc()
-
-# 刪除webhook
-async def delete_webhook():
-    try:
-        await bot.delete_webhook()
-        print("Webhook deleted")
-    except Exception as e:
-        print(f"Error deleting webhook: {e}")
 
 if __name__ == "__main__":
     print("Bot started in webhook mode!")
@@ -215,9 +221,5 @@ if __name__ == "__main__":
         )
     except KeyboardInterrupt:
         print("Bot stopped by user")
-        try:
-            asyncio.run(delete_webhook())
-        except:
-            pass
     except Exception as e:
         print(f"Server error: {e}")
