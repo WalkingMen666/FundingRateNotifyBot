@@ -114,6 +114,17 @@ application.add_handler(CommandHandler("start", start_command))
 application.add_handler(CommandHandler("funding", funding_command))
 application.add_handler(CallbackQueryHandler(button_callback))
 
+# 全域變數來追蹤初始化狀態
+app_initialized = False
+
+# 初始化 Application 的函數
+async def initialize_application():
+    global app_initialized
+    if not app_initialized:
+        await application.initialize()
+        app_initialized = True
+        print("Application initialized successfully!")
+
 # Webhook路由 - 修復版本
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -122,8 +133,13 @@ def webhook():
         json_str = request.get_data().decode('UTF-8')
         update = Update.de_json(json.loads(json_str), bot)
         
+        # 確保 application 已初始化後再處理更新
+        async def process_update_wrapper():
+            await initialize_application()
+            await application.process_update(update)
+        
         # 使用asyncio運行異步處理
-        asyncio.run(application.process_update(update))
+        asyncio.run(process_update_wrapper())
         
         return 'OK'
     except Exception as e:
@@ -145,6 +161,9 @@ def home():
 # 設置webhook
 async def set_webhook():
     try:
+        # 初始化 Application
+        await initialize_application()
+        
         if not webhook_url:
             print("Warning: WEBHOOK_URL not set, skipping webhook setup")
             return
