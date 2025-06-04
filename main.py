@@ -1,35 +1,30 @@
 import requests
-import telegram
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from flask import Flask, request
-import schedule
-import time
-import threading
 import os
-import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
+from flask import Flask, request
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+import asyncio
+import json
 
 load_dotenv()
-# Initialize Flask and Telegram Bot
-app = Flask(__name__)
+
+# 配置
 bot_token = os.getenv("BOT_TOKEN")
 chat_id = os.getenv("CHAT_ID")
-webhook_url = os.getenv("WEBHOOK_URL")  # 新增 webhook URL
-bot = telegram.Bot(token=bot_token)
+webhook_url = os.getenv("WEBHOOK_URL")  # 例如: https://yourdomain.com/webhook
+port = int(os.getenv("PORT", 5000))
 
 # MEXC API endpoint
 MEXC_FUNDING_RATE_URL = "https://contract.mexc.com/api/v1/contract/funding_rate"
 
-# 創建 Application 實例
+# 创建Flask应用
+app = Flask(__name__)
+
+# 创建Bot和Application
+bot = Bot(token=bot_token)
 application = Application.builder().token(bot_token).build()
-
-
-# Async function to send message
-async def send_message_async(chat_id, text, reply_markup=None):
-    await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
-
 
 # 獲取前3高資金費率的函數
 def get_top3_funding_rates():
@@ -57,7 +52,6 @@ def get_top3_funding_rates():
         print(f"Error fetching top3 funding rates: {e}")
     return None
 
-
 # 處理 /start 命令
 async def start_command(update, context):
     keyboard = [
@@ -70,13 +64,10 @@ async def start_command(update, context):
         reply_markup=reply_markup,
     )
 
-
-# 新增直接查詢指令 - 不需要按鈕
+# 新增直接查詢指令
 async def funding_command(update, context):
-    # 發送加載消息
     loading_msg = await update.message.reply_text("正在查詢資金費率數據...")
 
-    # 獲取前3高資金費率
     top3_rates = get_top3_funding_rates()
 
     if top3_rates:
@@ -85,7 +76,6 @@ async def funding_command(update, context):
         )
         message += "\n".join([f"{i+1}. {rate}" for i, rate in enumerate(top3_rates)])
 
-        # 添加按鈕供再次查詢
         keyboard = [[InlineKeyboardButton("重新查詢", callback_data="top3_funding")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -93,17 +83,14 @@ async def funding_command(update, context):
     else:
         await loading_msg.edit_text("查詢失敗，請稍後重試")
 
-
 # 處理按鈕回調
 async def button_callback(update, context):
     query = update.callback_query
     await query.answer()
 
     if query.data == "top3_funding":
-        # 發送加載消息
         await query.edit_message_text(text="正在查詢資金費率數據...")
 
-        # 獲取前3高資金費率
         top3_rates = get_top3_funding_rates()
 
         if top3_rates:
@@ -112,7 +99,6 @@ async def button_callback(update, context):
                 [f"{i+1}. {rate}" for i, rate in enumerate(top3_rates)]
             )
 
-            # 重新添加按鈕
             keyboard = [
                 [InlineKeyboardButton("重新查詢", callback_data="top3_funding")]
             ]
@@ -126,77 +112,75 @@ async def button_callback(update, context):
                 text="查詢失敗，請稍後重試", reply_markup=reply_markup
             )
 
-
 # 註冊處理器
 application.add_handler(CommandHandler("start", start_command))
 application.add_handler(CommandHandler("funding", funding_command))
 application.add_handler(CallbackQueryHandler(button_callback))
 
-
-# Flask Webhook 路由
-@app.route("/webhook", methods=["POST"])
+# Webhook路由
+@app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        update = telegram.Update.de_json(request.get_json(force=True), bot)
-        # 創建新的事件循環來處理異步操作
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(application.process_update(update))
-        loop.close()
-        return "OK"
+        # 獲取Telegram發送的數據
+        json_str = request.get_data().decode('UTF-8')
+        update = Update.de_json(json.loads(json_str), bot)
+        
+        # 使用asyncio運行異步處理
+        asyncio.run(application.process_update(update))
+        
+        return 'OK'
     except Exception as e:
         print(f"Webhook error: {e}")
-        return "Error", 500
+        return 'Error', 500
 
+# 健康檢查路由
+@app.route('/health', methods=['GET'])
+def health():
+    return 'Bot is running!', 200
 
-@app.route("/", methods=["GET"])
-def index():
-    return "Funding Rate Notify Bot is running!"
-
-
-@app.route("/set_webhook", methods=["GET"])
-def set_webhook():
+# 設置webhook
+async def set_webhook():
     try:
-        if webhook_url:
-            result = bot.set_webhook(url=f"{webhook_url}/webhook")
-            return f"Webhook set successfully: {result}"
-        else:
-            return "WEBHOOK_URL not configured in .env"
+        await bot.set_webhook(url=f"{webhook_url}/webhook")
+        print(f"Webhook set to: {webhook_url}/webhook")
+        
+        # 設置命令菜單
+        from telegram import BotCommand
+        await bot.set_my_commands([
+            BotCommand("start", "開始使用機器人"),
+            BotCommand("funding", "查詢前3高資金費率")
+        ])
+        print("Bot commands have been set!")
+        
     except Exception as e:
-        return f"Failed to set webhook: {e}"
+        print(f"Error setting webhook: {e}")
 
+# 刪除webhook（用於切換到polling模式）
+async def delete_webhook():
+    try:
+        await bot.delete_webhook()
+        print("Webhook deleted")
+    except Exception as e:
+        print(f"Error deleting webhook: {e}")
 
-# 定時任務（如果需要）
-def start_scheduler():
-    def run_scheduler():
-        while True:
-            schedule.run_pending()
-            time.sleep(60)
-
-    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
-    scheduler_thread.start()
-    print(f"Scheduler started at {datetime.now()}")
-
-
-# Main program
 if __name__ == "__main__":
-    print("Bot started in server mode!")
-    print("Available endpoints:")
-    print("/ - Bot status")
-    print("/webhook - Telegram webhook")
-    print("/set_webhook - Set webhook URL")
-
-    # 啟動定時任務（如果需要）
-    # start_scheduler()
-
-    port = int(os.getenv("PORT", 8443))
-
-    # 自動設置 webhook（如果配置了 WEBHOOK_URL）
-    if webhook_url:
-        try:
-            result = bot.set_webhook(url=f"{webhook_url}/webhook")
-            print(f"Webhook set: {result}")
-        except Exception as e:
-            print(f"Failed to set webhook: {e}")
-
-    app.run(host="0.0.0.0", port=port, debug=False)
+    print("Bot started in webhook mode!")
+    print(f"Server running on port {port}")
+    
+    # 設置webhook
+    asyncio.run(set_webhook())
+    
+    try:
+        # 啟動Flask服務器
+        app.run(
+            host='0.0.0.0',
+            port=port,
+            debug=False,
+            use_reloader=False
+        )
+    except KeyboardInterrupt:
+        print("Bot stopped by user")
+        # 清理webhook
+        asyncio.run(delete_webhook())
+    except Exception as e:
+        print(f"Server error: {e}")
