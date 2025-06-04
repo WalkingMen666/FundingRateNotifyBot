@@ -1,20 +1,20 @@
-import requests
 import os
+import json
+import asyncio
+import requests
 from datetime import datetime
 from dotenv import load_dotenv
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
-import asyncio
-import json
 
 load_dotenv()
 
 # 配置
 bot_token = os.getenv("BOT_TOKEN")
 chat_id = os.getenv("CHAT_ID")
-webhook_url = os.getenv("WEBHOOK_URL")  # 例如: https://yourdomain.com/webhook
-port = int(os.getenv("PORT", 5000))
+webhook_url = os.getenv("WEBHOOK_URL")
+port = int(os.getenv("PORT", 10000))
 
 # MEXC API endpoint
 MEXC_FUNDING_RATE_URL = "https://contract.mexc.com/api/v1/contract/funding_rate"
@@ -33,20 +33,17 @@ def get_top3_funding_rates():
         if response.status_code == 200:
             data = response.json()
             if data.get("success") and data.get("code") == 0:
-                # 按資金費率排序，取前3名
-                funding_data = data.get("data", [])
-                sorted_data = sorted(
-                    funding_data,
-                    key=lambda x: float(x.get("fundingRate", 0)),
-                    reverse=True,
-                )
-                top3 = sorted_data[:3]
-
+                rates = data.get("data", [])
+                # 按資金費率排序並取前3
+                sorted_rates = sorted(rates, key=lambda x: float(x.get("fundingRate", 0)), reverse=True)
+                top3 = sorted_rates[:3]
+                
                 result = []
-                for item in top3:
-                    funding_rate = float(item.get("fundingRate", 0))
-                    result.append(f"{item['symbol']}: {funding_rate*100:.4f}%")
-
+                for rate in top3:
+                    symbol = rate.get("symbol", "N/A")
+                    funding_rate = float(rate.get("fundingRate", 0)) * 100
+                    result.append(f"{symbol}: {funding_rate:.4f}%")
+                
                 return result
     except Exception as e:
         print(f"Error fetching top3 funding rates: {e}")
@@ -117,7 +114,7 @@ application.add_handler(CommandHandler("start", start_command))
 application.add_handler(CommandHandler("funding", funding_command))
 application.add_handler(CallbackQueryHandler(button_callback))
 
-# Webhook路由
+# Webhook路由 - 修復版本
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -131,6 +128,8 @@ def webhook():
         return 'OK'
     except Exception as e:
         print(f"Webhook error: {e}")
+        import traceback
+        traceback.print_exc()
         return 'Error', 500
 
 # 健康檢查路由
@@ -146,12 +145,10 @@ def home():
 # 設置webhook
 async def set_webhook():
     try:
-        # 檢查 webhook_url 是否存在
         if not webhook_url:
             print("Warning: WEBHOOK_URL not set, skipping webhook setup")
             return
         
-        # 確保 webhook_url 格式正確
         webhook_endpoint = f"{webhook_url.rstrip('/')}/webhook"
         await bot.set_webhook(url=webhook_endpoint)
         print(f"Webhook set to: {webhook_endpoint}")
@@ -166,9 +163,10 @@ async def set_webhook():
         
     except Exception as e:
         print(f"Error setting webhook: {e}")
-        print("Bot will continue running, but webhook may not work properly")
+        import traceback
+        traceback.print_exc()
 
-# 刪除webhook（用於切換到polling模式）
+# 刪除webhook
 async def delete_webhook():
     try:
         await bot.delete_webhook()
@@ -181,7 +179,7 @@ if __name__ == "__main__":
     print(f"Server running on port {port}")
     print(f"Webhook URL: {webhook_url}")
     
-    # 設置webhook（非阻塞）
+    # 設置webhook
     try:
         asyncio.run(set_webhook())
     except Exception as e:
@@ -198,7 +196,6 @@ if __name__ == "__main__":
         )
     except KeyboardInterrupt:
         print("Bot stopped by user")
-        # 清理webhook
         try:
             asyncio.run(delete_webhook())
         except:
