@@ -23,12 +23,12 @@ MEXC_FUNDING_RATE_URL = "https://contract.mexc.com/api/v1/contract/funding_rate"
 # 创建Flask应用
 app = Flask(__name__)
 
-# 創建Bot和Application - 確保正確初始化
-bot = Bot(token=bot_token)
-application = Application.builder().token(bot_token).build()
-
-# 初始化狀態追蹤
+# 全域變數
+bot = None
+application = None
 initialized = False
+background_loop = None
+background_thread = None
 
 # 獲取前3高資金費率的函數
 def get_top3_funding_rates():
@@ -113,11 +113,22 @@ async def button_callback(update, context):
                 text="查詢失敗，請稍後重試", reply_markup=reply_markup
             )
 
+# 背景事件循環執行函數
+def run_background_loop():
+    global background_loop
+    background_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(background_loop)
+    background_loop.run_forever()
+
 # 初始化函數
 async def initialize_bot():
-    global initialized
+    global bot, application, initialized
     if not initialized:
         try:
+            # 创建Bot和Application
+            bot = Bot(token=bot_token)
+            application = Application.builder().token(bot_token).build()
+            
             # 初始化 Bot 和 Application
             await bot.initialize()
             await application.initialize()
@@ -134,6 +145,14 @@ async def initialize_bot():
             print(f"Error during initialization: {e}")
             raise
 
+# 在背景事件循環中執行協程
+def run_coroutine_in_background(coro):
+    if background_loop and not background_loop.is_closed():
+        future = asyncio.run_coroutine_threadsafe(coro, background_loop)
+        return future.result(timeout=30)  # 30秒超時
+    else:
+        raise RuntimeError("Background loop is not running")
+
 # Webhook路由
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -142,20 +161,12 @@ def webhook():
         json_str = request.get_data().decode('UTF-8')
         update = Update.de_json(json.loads(json_str), bot)
         
-        # 在新的事件循環中處理更新
-        def run_async():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(initialize_bot())
-                loop.run_until_complete(application.process_update(update))
-            finally:
-                loop.close()
+        # 在背景事件循環中處理更新
+        async def process_update():
+            await initialize_bot()
+            await application.process_update(update)
         
-        # 在新線程中運行異步代碼
-        thread = threading.Thread(target=run_async)
-        thread.start()
-        thread.join()
+        run_coroutine_in_background(process_update())
         
         return 'OK'
     except Exception as e:
@@ -204,9 +215,17 @@ if __name__ == "__main__":
     print(f"Server running on port {port}")
     print(f"Webhook URL: {webhook_url}")
     
+    # 啟動背景事件循環
+    background_thread = threading.Thread(target=run_background_loop, daemon=True)
+    background_thread.start()
+    
+    # 等待背景循環啟動
+    import time
+    time.sleep(1)
+    
     # 設置webhook
     try:
-        asyncio.run(set_webhook())
+        run_coroutine_in_background(set_webhook())
     except Exception as e:
         print(f"Webhook setup failed: {e}")
         print("Continuing to start Flask server...")
@@ -221,5 +240,7 @@ if __name__ == "__main__":
         )
     except KeyboardInterrupt:
         print("Bot stopped by user")
+        if background_loop and not background_loop.is_closed():
+            background_loop.call_soon_threadsafe(background_loop.stop)
     except Exception as e:
         print(f"Server error: {e}")
