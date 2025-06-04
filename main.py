@@ -7,13 +7,15 @@ import time
 import threading
 import os
 from datetime import datetime
+from dotenv import load_dotenv
 
+load_dotenv()
 # 初始化 Flask 和 Telegram Bot
 app = Flask(__name__)
-# bot_token = os.getenv('BOT_TOKEN')  # 從環境變數獲取Bot Token
-# chat_id = os.getenv('CHAT_ID')      # 從環境變數獲取Chat ID
-bot_token = "7833872327:AAH7NmY907DxOn-h4RBJbpszJIfDyZY_ioo"
-chat_id = "5974801553"
+bot_token = os.getenv('BOT_TOKEN')  # 從環境變數獲取Bot Token
+chat_id = os.getenv('CHAT_ID')      # 從環境變數獲取Chat ID
+# bot_token = "7833872327:AAH7NmY907DxOn-h4RBJbpszJIfDyZY_ioo"
+# chat_id = "5974801553"
 bot = telegram.Bot(token=bot_token)
 
 # MEXC API 端點
