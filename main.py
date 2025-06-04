@@ -3,6 +3,7 @@ import json
 import requests
 import asyncio
 import threading
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 from flask import Flask, request
@@ -30,7 +31,7 @@ initialized = False
 background_loop = None
 background_thread = None
 
-# 獲取前3高資金費率的函數
+# 獲取前3高資金費率絕對值的函數
 def get_top3_funding_rates():
     try:
         response = requests.get(MEXC_FUNDING_RATE_URL, timeout=10)
@@ -38,15 +39,20 @@ def get_top3_funding_rates():
             data = response.json()
             if data.get("success") and data.get("code") == 0:
                 rates = data.get("data", [])
-                # 按資金費率排序並取前3
-                sorted_rates = sorted(rates, key=lambda x: float(x.get("fundingRate", 0)), reverse=True)
+                # 按資金費率絕對值排序並取前3
+                sorted_rates = sorted(rates, key=lambda x: abs(float(x.get("fundingRate", 0))), reverse=True)
                 top3 = sorted_rates[:3]
                 
                 result = []
                 for rate in top3:
                     symbol = rate.get("symbol", "N/A")
                     funding_rate = float(rate.get("fundingRate", 0)) * 100
-                    result.append(f"{symbol}: {funding_rate:.4f}%")
+                    # 顯示實際數值（包含正負號）和絕對值
+                    abs_rate = abs(funding_rate)
+                    if funding_rate >= 0:
+                        result.append(f"{symbol}: +{funding_rate:.4f}% (絕對值: {abs_rate:.4f}%)")
+                    else:
+                        result.append(f"{symbol}: {funding_rate:.4f}% (絕對值: {abs_rate:.4f}%)")
                 
                 return result
     except Exception as e:
@@ -56,12 +62,12 @@ def get_top3_funding_rates():
 # 處理 /start 命令
 async def start_command(update, context):
     keyboard = [
-        [InlineKeyboardButton("查詢前3高資金費率", callback_data="top3_funding")]
+        [InlineKeyboardButton("查詢前3高資金費率絕對值", callback_data="top3_funding")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        "歡迎使用資金費率通知機器人！\n點擊下方按鈕查詢當前MEXC前3高資金費率：",
+        "歡迎使用資金費率通知機器人！\n點擊下方按鈕查詢當前MEXC前3高資金費率絕對值的交易對：",
         reply_markup=reply_markup,
     )
 
@@ -73,7 +79,7 @@ async def funding_command(update, context):
 
     if top3_rates:
         message = (
-            f"MEXC前3高資金費率 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}):\n\n"
+            f"MEXC前3高資金費率絕對值 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}):\n\n"
         )
         message += "\n".join([f"{i+1}. {rate}" for i, rate in enumerate(top3_rates)])
 
@@ -95,7 +101,7 @@ async def button_callback(update, context):
         top3_rates = get_top3_funding_rates()
 
         if top3_rates:
-            message = f"MEXC前3高資金費率 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}):\n\n"
+            message = f"MEXC前3高資金費率絕對值 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}):\n\n"
             message += "\n".join(
                 [f"{i+1}. {rate}" for i, rate in enumerate(top3_rates)]
             )
@@ -201,7 +207,7 @@ async def set_webhook():
         # 設置命令菜單
         await bot.set_my_commands([
             BotCommand("start", "開始使用機器人"),
-            BotCommand("funding", "查詢前3高資金費率")
+            BotCommand("funding", "查詢前3高資金費率絕對值")
         ])
         print("Bot commands have been set!")
         
@@ -220,7 +226,6 @@ if __name__ == "__main__":
     background_thread.start()
     
     # 等待背景循環啟動
-    import time
     time.sleep(1)
     
     # 設置webhook
