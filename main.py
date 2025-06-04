@@ -138,11 +138,23 @@ def webhook():
 def health():
     return 'Bot is running!', 200
 
+# 添加根路由
+@app.route('/', methods=['GET'])
+def home():
+    return 'MEXC Funding Rate Notify Bot is running!', 200
+
 # 設置webhook
 async def set_webhook():
     try:
-        await bot.set_webhook(url=f"{webhook_url}/webhook")
-        print(f"Webhook set to: {webhook_url}/webhook")
+        # 檢查 webhook_url 是否存在
+        if not webhook_url:
+            print("Warning: WEBHOOK_URL not set, skipping webhook setup")
+            return
+        
+        # 確保 webhook_url 格式正確
+        webhook_endpoint = f"{webhook_url.rstrip('/')}/webhook"
+        await bot.set_webhook(url=webhook_endpoint)
+        print(f"Webhook set to: {webhook_endpoint}")
         
         # 設置命令菜單
         from telegram import BotCommand
@@ -154,6 +166,7 @@ async def set_webhook():
         
     except Exception as e:
         print(f"Error setting webhook: {e}")
+        print("Bot will continue running, but webhook may not work properly")
 
 # 刪除webhook（用於切換到polling模式）
 async def delete_webhook():
@@ -166,9 +179,14 @@ async def delete_webhook():
 if __name__ == "__main__":
     print("Bot started in webhook mode!")
     print(f"Server running on port {port}")
+    print(f"Webhook URL: {webhook_url}")
     
-    # 設置webhook
-    asyncio.run(set_webhook())
+    # 設置webhook（非阻塞）
+    try:
+        asyncio.run(set_webhook())
+    except Exception as e:
+        print(f"Webhook setup failed: {e}")
+        print("Continuing to start Flask server...")
     
     try:
         # 啟動Flask服務器
@@ -181,6 +199,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("Bot stopped by user")
         # 清理webhook
-        asyncio.run(delete_webhook())
+        try:
+            asyncio.run(delete_webhook())
+        except:
+            pass
     except Exception as e:
         print(f"Server error: {e}")
