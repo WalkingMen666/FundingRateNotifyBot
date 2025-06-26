@@ -4,9 +4,10 @@ import requests
 import asyncio
 import threading
 import time
+import schedule
 from datetime import datetime
 from dotenv import load_dotenv
-from flask import Flask, request
+from flask import Flask, request, render_template_string
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
@@ -30,6 +31,105 @@ application = None
 initialized = False
 background_loop = None
 background_thread = None
+current_top3_rates = []
+last_update_time = None
+
+# HTML 模板
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MEXC 資金費率監控</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="60">
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 40px; 
+            background-color: #f5f5f5; 
+        }
+        .container { 
+            max-width: 800px; 
+            margin: 0 auto; 
+            background: white; 
+            padding: 30px; 
+            border-radius: 10px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
+        }
+        h1 { 
+            color: #333; 
+            text-align: center; 
+            margin-bottom: 30px; 
+        }
+        .update-time { 
+            text-align: center; 
+            color: #666; 
+            margin-bottom: 20px; 
+        }
+        .rate-item { 
+            background: #f8f9fa; 
+            padding: 15px; 
+            margin: 10px 0; 
+            border-radius: 5px; 
+            border-left: 4px solid #007bff; 
+        }
+        .symbol { 
+            font-weight: bold; 
+            font-size: 18px; 
+            color: #333; 
+        }
+        .rate { 
+            font-size: 16px; 
+            color: #666; 
+        }
+        .high-rate { 
+            border-left-color: #dc3545; 
+            background: #fff5f5; 
+        }
+        .status { 
+            text-align: center; 
+            padding: 20px; 
+            color: #888; 
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>MEXC 資金費率絕對值排行榜</h1>
+        {% if last_update_time %}
+        <div class="update-time">
+            最後更新: {{ last_update_time }}
+        </div>
+        {% endif %}
+        
+        {% if rates %}
+            {% for rate in rates %}
+            <div class="rate-item {% if rate.abs_rate > 1.0 %}high-rate{% endif %}">
+                <div class="symbol">{{ loop.index }}. {{ rate.symbol }}</div>
+                <div class="rate">
+                    實際費率: {{ rate.actual_rate }}% | 
+                    絕對值: {{ rate.abs_rate }}%
+                    {% if rate.abs_rate > 1.0 %}
+                    <strong style="color: #dc3545;"> (高風險)</strong>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        {% else %}
+        <div class="status">
+            正在獲取資金費率數據...
+        </div>
+        {% endif %}
+        
+        <div style="text-align: center; margin-top: 30px; color: #888; font-size: 14px;">
+            頁面每分鐘自動刷新 | 
+            監控時間: 03:55, 07:55, 11:55, 15:55, 19:55, 23:55
+        </div>
+    </div>
+</body>
+</html>
+"""
 
 # 獲取前3高資金費率絕對值的函數
 def get_top3_funding_rates():
@@ -47,17 +147,80 @@ def get_top3_funding_rates():
                 for rate in top3:
                     symbol = rate.get("symbol", "N/A")
                     funding_rate = float(rate.get("fundingRate", 0)) * 100
-                    # 顯示實際數值（包含正負號）和絕對值
                     abs_rate = abs(funding_rate)
-                    if funding_rate >= 0:
-                        result.append(f"{symbol}: +{funding_rate:.4f}% (絕對值: {abs_rate:.4f}%)")
-                    else:
-                        result.append(f"{symbol}: {funding_rate:.4f}% (絕對值: {abs_rate:.4f}%)")
+                    
+                    result.append({
+                        'symbol': symbol,
+                        'actual_rate': f"{funding_rate:+.4f}",
+                        'abs_rate': abs_rate,
+                        'raw_rate': funding_rate
+                    })
                 
                 return result
     except Exception as e:
         print(f"Error fetching top3 funding rates: {e}")
     return None
+
+# 更新資金費率數據
+def update_funding_rates():
+    global current_top3_rates, last_update_time
+    try:
+        rates = get_top3_funding_rates()
+        if rates:
+            current_top3_rates = rates
+            last_update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"Updated funding rates at {last_update_time}")
+        else:
+            print("Failed to update funding rates")
+    except Exception as e:
+        print(f"Error updating funding rates: {e}")
+
+# 發送Telegram通知
+async def send_telegram_notification(rates):
+    try:
+        if not bot or not chat_id:
+            print("Bot or chat_id not configured")
+            return
+            
+        message = f"🚨 高資金費率警報 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n\n"
+        message += "發現資金費率絕對值超過1%的交易對:\n\n"
+        
+        for i, rate in enumerate(rates):
+            if rate['abs_rate'] > 1.0:
+                message += f"{i+1}. {rate['symbol']}: {rate['actual_rate']}% (絕對值: {rate['abs_rate']:.4f}%)\n"
+        
+        await bot.send_message(chat_id=chat_id, text=message)
+        print("Telegram notification sent successfully")
+    except Exception as e:
+        print(f"Error sending Telegram notification: {e}")
+
+# 檢查並發送通知
+def check_and_notify():
+    try:
+        current_time = datetime.now()
+        current_minute = current_time.strftime('%H:%M')
+        
+        # 檢查是否為指定時間
+        if current_minute in ['03:55', '07:55', '11:55', '15:55', '19:55', '23:55']:
+            print(f"Checking rates at {current_minute}")
+            
+            if current_top3_rates:
+                high_rates = [rate for rate in current_top3_rates if rate['abs_rate'] > 1.0]
+                
+                if high_rates:
+                    print(f"Found {len(high_rates)} high funding rates")
+                    # 在背景循環中發送通知
+                    if background_loop and not background_loop.is_closed():
+                        asyncio.run_coroutine_threadsafe(
+                            send_telegram_notification(current_top3_rates), 
+                            background_loop
+                        )
+                else:
+                    print("No high funding rates found")
+            else:
+                print("No current rates data available")
+    except Exception as e:
+        print(f"Error in check_and_notify: {e}")
 
 # 處理 /start 命令
 async def start_command(update, context):
@@ -75,13 +238,10 @@ async def start_command(update, context):
 async def funding_command(update, context):
     loading_msg = await update.message.reply_text("正在查詢資金費率數據...")
 
-    top3_rates = get_top3_funding_rates()
-
-    if top3_rates:
-        message = (
-            f"MEXC前3高資金費率絕對值 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}):\n\n"
-        )
-        message += "\n".join([f"{i+1}. {rate}" for i, rate in enumerate(top3_rates)])
+    if current_top3_rates:
+        message = f"MEXC前3高資金費率絕對值 ({last_update_time}):\n\n"
+        for i, rate in enumerate(current_top3_rates):
+            message += f"{i+1}. {rate['symbol']}: {rate['actual_rate']}% (絕對值: {rate['abs_rate']:.4f}%)\n"
 
         keyboard = [[InlineKeyboardButton("重新查詢", callback_data="top3_funding")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -98,13 +258,10 @@ async def button_callback(update, context):
     if query.data == "top3_funding":
         await query.edit_message_text(text="正在查詢資金費率數據...")
 
-        top3_rates = get_top3_funding_rates()
-
-        if top3_rates:
-            message = f"MEXC前3高資金費率絕對值 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}):\n\n"
-            message += "\n".join(
-                [f"{i+1}. {rate}" for i, rate in enumerate(top3_rates)]
-            )
+        if current_top3_rates:
+            message = f"MEXC前3高資金費率絕對值 ({last_update_time}):\n\n"
+            for i, rate in enumerate(current_top3_rates):
+                message += f"{i+1}. {rate['symbol']}: {rate['actual_rate']}% (絕對值: {rate['abs_rate']:.4f}%)\n"
 
             keyboard = [
                 [InlineKeyboardButton("重新查詢", callback_data="top3_funding")]
@@ -118,6 +275,16 @@ async def button_callback(update, context):
             await query.edit_message_text(
                 text="查詢失敗，請稍後重試", reply_markup=reply_markup
             )
+
+# 排程任務執行函數
+def run_scheduler():
+    while True:
+        try:
+            schedule.run_pending()
+            time.sleep(1)
+        except Exception as e:
+            print(f"Error in scheduler: {e}")
+            time.sleep(60)
 
 # 背景事件循環執行函數
 def run_background_loop():
@@ -155,7 +322,7 @@ async def initialize_bot():
 def run_coroutine_in_background(coro):
     if background_loop and not background_loop.is_closed():
         future = asyncio.run_coroutine_threadsafe(coro, background_loop)
-        return future.result(timeout=30)  # 30秒超時
+        return future.result(timeout=30)
     else:
         raise RuntimeError("Background loop is not running")
 
@@ -163,11 +330,9 @@ def run_coroutine_in_background(coro):
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # 獲取Telegram發送的數據
         json_str = request.get_data().decode('UTF-8')
         update = Update.de_json(json.loads(json_str), bot)
         
-        # 在背景事件循環中處理更新
         async def process_update():
             await initialize_bot()
             await application.process_update(update)
@@ -186,10 +351,12 @@ def webhook():
 def health():
     return 'Bot is running!', 200
 
-# 添加根路由
+# 主頁路由 - 顯示當前前3高資金費率
 @app.route('/', methods=['GET'])
 def home():
-    return 'MEXC Funding Rate Notify Bot is running!', 200
+    return render_template_string(HTML_TEMPLATE, 
+                                rates=current_top3_rates, 
+                                last_update_time=last_update_time)
 
 # 設置webhook
 async def set_webhook():
@@ -204,7 +371,6 @@ async def set_webhook():
         await bot.set_webhook(url=webhook_endpoint)
         print(f"Webhook set to: {webhook_endpoint}")
         
-        # 設置命令菜單
         await bot.set_my_commands([
             BotCommand("start", "開始使用機器人"),
             BotCommand("funding", "查詢前3高資金費率絕對值")
@@ -227,6 +393,17 @@ if __name__ == "__main__":
     
     # 等待背景循環啟動
     time.sleep(1)
+    
+    # 初始更新資金費率數據
+    update_funding_rates()
+    
+    # 設置排程任務
+    schedule.every().minute.do(update_funding_rates)  # 每分鐘更新
+    schedule.every().minute.do(check_and_notify)      # 每分鐘檢查通知
+    
+    # 啟動排程器
+    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+    scheduler_thread.start()
     
     # 設置webhook
     try:

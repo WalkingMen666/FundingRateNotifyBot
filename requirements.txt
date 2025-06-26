@@ -1,5 +1,5 @@
-requests
-python-telegram-bot
-Flask
-schedule
-python-dotenv
+requests==2.31.0
+python-dotenv==1.0.0
+Flask==2.3.3
+python-telegram-bot==20.7
+schedule==1.2.0
